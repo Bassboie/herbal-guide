@@ -1,0 +1,6 @@
+{
+  "name": "Herbal Guide",
+  "description": "Explore Herbal Guide, an educational digital guide covering traditional wellness practices, preparation information, safety reminders, and responsible natural-health learning.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
