@@ -23,6 +23,14 @@ export const ORDER_SESSION_COOKIE_NAME = 'hg_order_session';
 export const ORDER_SESSION_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 export const MAX_DOWNLOADS_PER_ORDER = 15;
 
+export function isServerlessRuntime(): boolean {
+  return Boolean(
+    process.env.NETLIFY_FUNCTION_RUNTIME === 'true' ||
+      process.env.NETLIFY === 'true' ||
+      process.env.AWS_LAMBDA_FUNCTION_NAME
+  );
+}
+
 // Ephemeral fallback secret for local dev only if env vars are unset
 const EPHEMERAL_FALLBACK_SECRET = crypto.randomBytes(32).toString('hex');
 let warnedMissingTokenSecret = false;
@@ -517,6 +525,8 @@ export function getAllowedOrigins(): string[] {
   const origins = new Set<string>();
   const candidates = [
     process.env.APP_URL || '',
+    process.env.URL || '',
+    process.env.DEPLOY_PRIME_URL || '',
     ...(process.env.ALLOWED_ORIGINS || '').split(','),
   ];
 
@@ -539,12 +549,14 @@ export function getAllowedOrigins(): string[] {
  * Resolves a safe, non-spoofable callback base URL (prevents Origin Header Injection / Open Redirect).
  */
 export function getSafeAppBaseUrl(req: Request): string {
-  const configuredAppUrl = (process.env.APP_URL || '').trim().replace(/\/+$/, '');
+  const configuredAppUrl = (process.env.APP_URL || process.env.URL || '')
+    .trim()
+    .replace(/\/+$/, '');
   if (configuredAppUrl && /^https?:\/\/[a-zA-Z0-9.-]+(:\d+)?$/.test(configuredAppUrl)) {
     return configuredAppUrl;
   }
 
-  // Behind Nginx/Cloud Run, Nginx sets Host=localhost:3000 and puts the real host in X-Forwarded-Host
+  // Behind Nginx/Cloud Run/Netlify, proxy sets the real host in X-Forwarded-Host
   const forwardedHostRaw = req.get('x-forwarded-host') || '';
   const forwardedHost = forwardedHostRaw.split(',')[0].trim();
   if (forwardedHost && /^[a-zA-Z0-9.-]+(:\d+)?$/.test(forwardedHost)) {

@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS public.orders (
     customer_name TEXT NOT NULL,
     customer_email TEXT NOT NULL,
     customer_phone TEXT NOT NULL DEFAULT '',
-    amount NUMERIC(10, 2) NOT NULL DEFAULT 200.00 CHECK (amount = 200.00),
+    amount NUMERIC(10, 2) NOT NULL DEFAULT 3000.00 CHECK (amount = 3000.00),
     currency TEXT NOT NULL DEFAULT 'NGN' CHECK (currency = 'NGN'),
     payment_gateway TEXT NOT NULL DEFAULT 'paystack' CHECK (payment_gateway IN ('paystack', 'selar')),
     payment_status TEXT NOT NULL DEFAULT 'pending' CHECK (payment_status IN ('pending', 'completed', 'failed', 'refunded')),
@@ -42,6 +42,9 @@ CREATE TABLE IF NOT EXISTS public.orders (
 ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS product_id TEXT NOT NULL DEFAULT 'herbal-guide-pdf';
 ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS last_download_at TIMESTAMPTZ;
 ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS paid_at TIMESTAMPTZ;
+ALTER TABLE public.orders DROP CONSTRAINT IF EXISTS orders_amount_check;
+ALTER TABLE public.orders ADD CONSTRAINT orders_amount_check CHECK (amount = 3000.00);
+ALTER TABLE public.orders ALTER COLUMN amount SET DEFAULT 3000.00;
 
 -- Indexes for fast server-side lookups
 CREATE INDEX IF NOT EXISTS idx_orders_order_ref ON public.orders(order_ref);
@@ -60,7 +63,7 @@ CREATE TABLE IF NOT EXISTS public.customers (
     full_name TEXT NOT NULL,
     phone TEXT NOT NULL DEFAULT '',
     total_orders INTEGER NOT NULL DEFAULT 1 CHECK (total_orders >= 0),
-    total_spent NUMERIC(10, 2) NOT NULL DEFAULT 200.00 CHECK (total_spent >= 0),
+    total_spent NUMERIC(10, 2) NOT NULL DEFAULT 3000.00 CHECK (total_spent >= 0),
     first_purchase_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now()),
     last_purchase_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now()),
     created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now()),

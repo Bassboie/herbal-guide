@@ -26,9 +26,16 @@ declare global {
   }
 }
 
+export type PaystackGatewayMode = 'live' | 'test' | 'unconfigured' | 'unavailable';
+
 export interface PaystackGatewayConfig {
   isConfigured: boolean;
   isLiveMode: boolean;
+  mode: PaystackGatewayMode;
+  backendReachable: boolean;
+  keyModeMismatch?: boolean;
+  persistenceConfigured?: boolean;
+  errorMessage?: string;
   publicKey: string | null;
   supportedChannels?: string[];
 }
@@ -130,48 +137,72 @@ export const formatPaystackChannelName = (channel?: string): string => {
 let cachedConfig: PaystackGatewayConfig | null = null;
 
 /**
- * Retrieves public Paystack configuration cleanly from the backend (or Vite build env).
- * Never uses hardcoded fallback keys or localStorage overrides.
+ * Retrieves public Paystack configuration strictly from the backend API.
+ * Never silently falls back to Test Mode when the backend is unavailable or misconfigured.
  */
 export const fetchPaystackConfig = async (): Promise<PaystackGatewayConfig> => {
   try {
     const res = await fetch('/api/paystack/config', {
       method: 'GET',
       credentials: 'same-origin',
+      cache: 'no-store',
     });
-    if (res.ok) {
-      const data = (await res.json()) as PaystackGatewayConfig;
-      cachedConfig = data;
-      return data;
+
+    const contentType = (res.headers.get('content-type') || '').toLowerCase();
+    if (!res.ok || !contentType.includes('application/json')) {
+      cachedConfig = null;
+      return {
+        isConfigured: false,
+        isLiveMode: false,
+        mode: 'unavailable',
+        backendReachable: false,
+        publicKey: null,
+        errorMessage:
+          'Payment backend API is unreachable. Ensure the backend server or Netlify Functions are deployed and /api/* routes correctly.',
+      };
     }
+
+    const raw = (await res.json()) as Partial<PaystackGatewayConfig>;
+    const mode: PaystackGatewayMode =
+      raw.mode || (raw.isConfigured ? (raw.isLiveMode ? 'live' : 'test') : 'unconfigured');
+
+    const normalized: PaystackGatewayConfig = {
+      isConfigured: Boolean(raw.isConfigured),
+      isLiveMode: Boolean(raw.isConfigured && mode === 'live'),
+      mode,
+      backendReachable: true,
+      keyModeMismatch: Boolean(raw.keyModeMismatch),
+      persistenceConfigured: raw.persistenceConfigured,
+      errorMessage: raw.errorMessage,
+      publicKey: raw.publicKey || null,
+      supportedChannels: raw.supportedChannels,
+    };
+
+    cachedConfig = normalized;
+    return normalized;
   } catch {
-    // Fall back to build-time VITE_PAYSTACK_PUBLIC_KEY if config endpoint temporarily fails
+    cachedConfig = null;
+    return {
+      isConfigured: false,
+      isLiveMode: false,
+      mode: 'unavailable',
+      backendReachable: false,
+      publicKey: null,
+      errorMessage:
+        'Unable to reach the payment configuration backend. Please check your connection or server deployment.',
+    };
   }
-
-  const envPubKey = (import.meta.env.VITE_PAYSTACK_PUBLIC_KEY || '').trim();
-  const validEnvKey =
-    envPubKey && !envPubKey.includes('sample_key') && envPubKey.startsWith('pk_')
-      ? envPubKey
-      : null;
-
-  return {
-    isConfigured: Boolean(validEnvKey),
-    isLiveMode: Boolean(validEnvKey && validEnvKey.startsWith('pk_live_')),
-    publicKey: validEnvKey,
-  };
 };
 
 export const getCachedPaystackPublicKey = (): string => {
-  if (cachedConfig?.publicKey) return cachedConfig.publicKey;
-  const envKey = (import.meta.env.VITE_PAYSTACK_PUBLIC_KEY || '').trim();
-  if (envKey && !envKey.includes('sample_key') && envKey.startsWith('pk_')) {
-    return envKey;
+  if (cachedConfig?.isConfigured && cachedConfig.publicKey) {
+    return cachedConfig.publicKey;
   }
   return '';
 };
 
 export const isLiveKey = (key?: string): boolean => {
-  if (cachedConfig) return cachedConfig.isLiveMode;
+  if (cachedConfig) return Boolean(cachedConfig.isConfigured && cachedConfig.isLiveMode);
   const k = key || getCachedPaystackPublicKey();
   return k.startsWith('pk_live_');
 };
@@ -231,6 +262,14 @@ export interface BackendInitResponse {
   message?: string;
 }
 
+async function parseJsonApiResponse(res: Response, unavailableMessage: string): Promise<any> {
+  const contentType = (res.headers.get('content-type') || '').toLowerCase();
+  if (!contentType.includes('application/json')) {
+    throw new Error(unavailableMessage);
+  }
+  return res.json();
+}
+
 /**
  * Initializes transaction strictly on the backend endpoint.
  * Price and currency are determined authoritatively by the server.
@@ -259,7 +298,10 @@ export const initializeBackendTransaction = async (params: {
     }),
   });
 
-  const data = await res.json();
+  const data = await parseJsonApiResponse(
+    res,
+    'Payment backend API is unavailable. Please ensure /api/* routes to your backend function.'
+  );
   if (!res.ok || !data.success || !data.access_code || !data.reference) {
     throw new Error(data.message || 'Unable to initialize secure payment session.');
   }
@@ -304,7 +346,10 @@ export const verifyPaystackTransaction = async (
     method: 'GET',
     credentials: 'same-origin',
   });
-  const data = await res.json();
+  const data = await parseJsonApiResponse(
+    res,
+    'Payment verification backend is unavailable. Please try again or contact support.'
+  );
 
   if (!res.ok) {
     throw new Error(data.message || 'Payment verification failed.');
@@ -395,11 +440,12 @@ export const initiatePaystackPayment = async ({
 }: PaystackTransactionParams): Promise<void> => {
   try {
     const config = await fetchPaystackConfig();
-    const publicKey = config.publicKey || getCachedPaystackPublicKey();
-
-    if (!publicKey) {
-      throw new Error('Payment gateway is not configured yet. Please contact support.');
+    if (!config.backendReachable || !config.isConfigured || !config.publicKey) {
+      throw new Error(
+        config.errorMessage || 'Payment gateway is not configured yet. Please contact support.'
+      );
     }
+    const publicKey = config.publicKey;
 
     // Strictly initialize transaction on the backend (no insecure client-side fallback)
     const initData = await initializeBackendTransaction({

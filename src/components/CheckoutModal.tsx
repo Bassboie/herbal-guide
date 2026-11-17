@@ -15,6 +15,7 @@ import {
   RefreshCw,
 } from 'lucide-react';
 import {
+  PaystackGatewayConfig,
   fetchPaystackConfig,
   formatPaystackChannelName,
   initiatePaystackPayment,
@@ -48,17 +49,31 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ isOpen, onClose })
   const [isVerifyingPending, setIsVerifyingPending] = useState(false);
   const [fallbackAuthUrl, setFallbackAuthUrl] = useState('');
   const [processingStatus, setProcessingStatus] = useState('Opening secure Paystack gateway...');
-  const [isLive, setIsLive] = useState(false);
+  const [gatewayConfig, setGatewayConfig] = useState<PaystackGatewayConfig | null>(null);
+  const [checkingGateway, setCheckingGateway] = useState(false);
 
   useEffect(() => {
     if (isOpen) {
+      let active = true;
+      setCheckingGateway(true);
       fetchPaystackConfig().then((cfg) => {
-        setIsLive(cfg.isLiveMode);
+        if (!active) return;
+        setGatewayConfig(cfg);
+        setCheckingGateway(false);
       });
+      return () => {
+        active = false;
+      };
     }
   }, [isOpen]);
 
   if (!isOpen) return null;
+
+  const isConfigReady = Boolean(gatewayConfig?.isConfigured && gatewayConfig?.backendReachable);
+  const isConfigError = Boolean(!checkingGateway && gatewayConfig && !isConfigReady);
+  const gatewayErrorMessage =
+    gatewayConfig?.errorMessage ||
+    'Paystack payment backend is unavailable or not configured. Please verify your server deployment and environment variables.';
 
   const handleDetailsSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -257,12 +272,22 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ isOpen, onClose })
               </span>
               <span
                 className={`text-[9px] sm:text-[10px] font-bold px-2 py-0.5 rounded-full border ${
-                  isLive
+                  checkingGateway || !gatewayConfig
+                    ? 'bg-white/10 text-white/80 border-white/25'
+                    : isConfigError
+                    ? 'bg-red-500/20 text-red-200 border-red-400/50'
+                    : gatewayConfig.mode === 'live'
                     ? 'bg-emerald-500/20 text-emerald-300 border-emerald-400/40'
                     : 'bg-amber-500/20 text-amber-300 border-amber-400/40'
                 }`}
               >
-                {isLive ? '● Live Gateway' : '● Test Mode'}
+                {checkingGateway || !gatewayConfig
+                  ? '● Checking Gateway'
+                  : isConfigError
+                  ? '● Config Error'
+                  : gatewayConfig.mode === 'live'
+                  ? '● Live Gateway'
+                  : '● Test Mode'}
               </span>
             </div>
             <h3 className="text-base sm:text-lg font-bold font-editorial text-white flex items-center gap-2 mt-0.5">
@@ -301,6 +326,14 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ isOpen, onClose })
                   <p className="text-xs text-[#4A6354]">
                     Where should we send your digital PDF download link and Paystack receipt?
                   </p>
+                  {isConfigError && (
+                    <div className="p-3 mt-2 rounded-lg bg-red-50 border border-red-200 text-xs text-red-800 flex items-start gap-2">
+                      <AlertCircle className="w-4 h-4 shrink-0 text-red-600 mt-0.5" />
+                      <span>
+                        <strong>Paystack Configuration Error:</strong> {gatewayErrorMessage}
+                      </span>
+                    </div>
+                  )}
                   {errorMsg && (
                     <div className="p-3 mt-2 rounded-lg bg-red-50 border border-red-200 text-xs text-red-700 flex items-center gap-2">
                       <AlertCircle className="w-4 h-4 shrink-0" />
@@ -445,6 +478,15 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ isOpen, onClose })
                 <span className="font-mono text-[#061A0E]">{email.trim().toLowerCase()}</span>
               </div>
 
+              {isConfigError && (
+                <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-xs text-red-800 flex items-start gap-2">
+                  <AlertCircle className="w-4 h-4 shrink-0 text-red-600 mt-0.5" />
+                  <div className="flex-1">
+                    <strong>Paystack Configuration Error:</strong> {gatewayErrorMessage}
+                  </div>
+                </div>
+              )}
+
               {errorMsg && (
                 <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-800 flex items-start gap-2">
                   <AlertCircle className="w-4 h-4 shrink-0 text-amber-600 mt-0.5" />
@@ -488,11 +530,16 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ isOpen, onClose })
 
                 <button
                   type="button"
+                  disabled={isConfigError || checkingGateway}
                   onClick={handlePaystackPayment}
-                  className="w-full py-3.5 px-4 rounded-xl bg-gradient-to-r from-[#061A0E] via-[#0F3822] to-[#061A0E] text-white font-bold text-sm border border-[#D4AF37]/50 hover:border-[#F5D061] hover:-translate-y-0.5 hover:shadow-[0_10px_25px_rgba(212,175,55,0.25)] active:scale-[0.99] transition-all flex items-center justify-center gap-2 cursor-pointer shadow-md"
+                  className="w-full py-3.5 px-4 rounded-xl bg-gradient-to-r from-[#061A0E] via-[#0F3822] to-[#061A0E] text-white font-bold text-sm border border-[#D4AF37]/50 hover:border-[#F5D061] hover:-translate-y-0.5 hover:shadow-[0_10px_25px_rgba(212,175,55,0.25)] active:scale-[0.99] transition-all flex items-center justify-center gap-2 cursor-pointer shadow-md disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:translate-y-0"
                 >
                   <Lock className="w-4 h-4 text-[#F5D061]" />
-                  <span>Pay ₦3,000 with Paystack</span>
+                  <span>
+                    {isConfigError
+                      ? 'Paystack Unavailable (Configuration Error)'
+                      : 'Pay ₦3,000 with Paystack'}
+                  </span>
                 </button>
 
                 {paystackTxRef && (

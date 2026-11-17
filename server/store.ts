@@ -2,6 +2,7 @@ import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import {
   type ProductId,
   hashValue,
+  isServerlessRuntime,
   maskEmail,
   maskReference,
   securityLog,
@@ -48,7 +49,8 @@ export function getSupabaseAdminClient(): SupabaseClient | null {
     !url ||
     !serviceRoleKey ||
     url.includes('your-project-ref') ||
-    serviceRoleKey.includes('your-service-role-key')
+    serviceRoleKey.includes('your-service-role-key') ||
+    serviceRoleKey.includes('replace_with_service_role_key')
   ) {
     return null;
   }
@@ -67,6 +69,14 @@ export function getSupabaseAdminClient(): SupabaseClient | null {
     });
     return null;
   }
+}
+
+export function isSupabaseConfigured(): boolean {
+  return Boolean(getSupabaseAdminClient());
+}
+
+export function isPersistentStoreRequired(): boolean {
+  return isServerlessRuntime() || process.env.REQUIRE_PERSISTENT_DB === 'true';
 }
 
 /**
@@ -100,48 +110,65 @@ export async function createPendingOrder(params: {
     updatedAt: now,
   };
 
-  ordersMap.set(params.reference, record);
-
   const db = getSupabaseAdminClient();
-  if (db) {
-    try {
-      const { error } = await db.from('orders').insert({
-        order_ref: record.reference,
-        product_id: record.productId,
-        customer_name: record.customerName,
-        customer_email: record.customerEmail,
-        customer_phone: record.customerPhone,
-        amount: record.expectedAmountNgn,
-        currency: record.currency,
-        payment_gateway: 'paystack',
-        payment_status: 'pending',
-        paystack_reference: record.reference,
-      });
-      if (error) {
-        securityLog('warn', 'db_create_pending_order_error', {
-          ref: maskReference(record.reference),
-          code: error.code || 'unknown',
-        });
-      }
-    } catch {
-      securityLog('warn', 'db_create_pending_order_exception', {
+  if (!db) {
+    if (isPersistentStoreRequired()) {
+      securityLog('error', 'persistent_db_required_for_pending_order');
+      throw new Error('Persistent database storage is not configured.');
+    }
+    ordersMap.set(params.reference, record);
+    return record;
+  }
+
+  try {
+    const { error } = await db.from('orders').insert({
+      order_ref: record.reference,
+      product_id: record.productId,
+      customer_name: record.customerName,
+      customer_email: record.customerEmail,
+      customer_phone: record.customerPhone,
+      amount: record.expectedAmountNgn,
+      currency: record.currency,
+      payment_gateway: 'paystack',
+      payment_status: 'pending',
+      paystack_reference: record.reference,
+    });
+    if (error) {
+      securityLog('error', 'db_create_pending_order_error', {
         ref: maskReference(record.reference),
+        code: error.code || 'unknown',
       });
+      if (isPersistentStoreRequired()) {
+        throw new Error('Unable to persist order record.');
+      }
+    }
+  } catch (err) {
+    securityLog('error', 'db_create_pending_order_exception', {
+      ref: maskReference(record.reference),
+    });
+    if (isPersistentStoreRequired()) {
+      throw err instanceof Error ? err : new Error('Unable to persist order record.');
     }
   }
 
+  ordersMap.set(params.reference, record);
   return record;
 }
 
 /**
- * Fetches an order from memory or Supabase Admin database.
+ * Fetches an order from Supabase Admin database (authoritative in serverless) or memory.
  */
 export async function getOrderByReference(reference: string): Promise<ServerOrderRecord | null> {
-  const cached = ordersMap.get(reference);
-  if (cached) return cached;
-
   const db = getSupabaseAdminClient();
-  if (!db) return null;
+  if (!db) {
+    return isPersistentStoreRequired() ? null : ordersMap.get(reference) || null;
+  }
+
+  // In non-serverless single-process dev/node runtime, allow fast cache hit only if already loaded
+  if (!isServerlessRuntime()) {
+    const cached = ordersMap.get(reference);
+    if (cached) return cached;
+  }
 
   try {
     const { data, error } = await db
@@ -152,7 +179,9 @@ export async function getOrderByReference(reference: string): Promise<ServerOrde
       .eq('order_ref', reference)
       .maybeSingle();
 
-    if (error || !data) return null;
+    if (error || !data) {
+      return isServerlessRuntime() ? null : ordersMap.get(reference) || null;
+    }
 
     const amountNgn = Number(data.amount) || 3000;
     const record: ServerOrderRecord = {
@@ -178,7 +207,7 @@ export async function getOrderByReference(reference: string): Promise<ServerOrde
     ordersMap.set(reference, record);
     return record;
   } catch {
-    return null;
+    return isServerlessRuntime() ? null : ordersMap.get(reference) || null;
   }
 }
 
@@ -242,9 +271,14 @@ export async function markOrderCompletedIdempotent(params: {
       }
     }
 
+    const db = getSupabaseAdminClient();
+    if (!db && isPersistentStoreRequired()) {
+      securityLog('error', 'persistent_db_required_for_completion');
+      throw new Error('Persistent database storage is not configured.');
+    }
+
     ordersMap.set(params.reference, existing);
 
-    const db = getSupabaseAdminClient();
     if (db) {
       try {
         const { error } = await db.from('orders').upsert(
@@ -266,15 +300,21 @@ export async function markOrderCompletedIdempotent(params: {
           { onConflict: 'order_ref' }
         );
         if (error) {
-          securityLog('warn', 'db_complete_order_error', {
+          securityLog('error', 'db_complete_order_error', {
             ref: maskReference(existing.reference),
             code: error.code || 'unknown',
           });
+          if (isPersistentStoreRequired()) {
+            throw new Error('Unable to record completed payment.');
+          }
         }
-      } catch {
-        securityLog('warn', 'db_complete_order_exception', {
+      } catch (err) {
+        securityLog('error', 'db_complete_order_exception', {
           ref: maskReference(existing.reference),
         });
+        if (isPersistentStoreRequired()) {
+          throw err instanceof Error ? err : new Error('Unable to record completed payment.');
+        }
       }
     }
 
@@ -300,34 +340,46 @@ export async function claimWebhookEvent(
   reference: string,
   paystackEventId?: string
 ): Promise<boolean> {
-  if (processedWebhookEvents.has(eventKey)) {
+  if (!isServerlessRuntime() && processedWebhookEvents.has(eventKey)) {
     return false;
   }
 
   const db = getSupabaseAdminClient();
-  if (db) {
-    try {
-      const { error } = await db.from('webhook_events').insert({
-        event_key: eventKey,
-        event_type: eventType,
-        order_ref: reference,
-        paystack_event_id: paystackEventId || null,
-        status: 'processed',
-      });
+  if (!db) {
+    if (isPersistentStoreRequired()) {
+      securityLog('error', 'persistent_db_required_for_webhook');
+      throw new Error('Persistent database storage is not configured.');
+    }
+    if (processedWebhookEvents.has(eventKey)) {
+      return false;
+    }
+    processedWebhookEvents.add(eventKey);
+    return true;
+  }
 
-      if (error) {
-        // PostgreSQL unique_violation (23505) means duplicate event
-        if (error.code === '23505') {
-          processedWebhookEvents.add(eventKey);
-          return false;
-        }
-        securityLog('warn', 'db_webhook_idempotency_notice', {
-          ref: maskReference(reference),
-          code: error.code || 'unknown',
-        });
+  try {
+    const { error } = await db.from('webhook_events').insert({
+      event_key: eventKey,
+      event_type: eventType,
+      order_ref: reference,
+      paystack_event_id: paystackEventId || null,
+      status: 'processed',
+    });
+
+    if (error) {
+      // PostgreSQL unique_violation (23505) means duplicate event
+      if (error.code === '23505') {
+        processedWebhookEvents.add(eventKey);
+        return false;
       }
-    } catch {
-      // Fall back to in-memory lock if DB is temporarily unreachable
+      securityLog('warn', 'db_webhook_idempotency_notice', {
+        ref: maskReference(reference),
+        code: error.code || 'unknown',
+      });
+    }
+  } catch {
+    if (isPersistentStoreRequired()) {
+      throw new Error('Database idempotency check failed.');
     }
   }
 
@@ -345,17 +397,22 @@ export async function recordDownloadAttempt(params: {
   clientIp: string;
   userAgent: string;
 }): Promise<number> {
-  const order = ordersMap.get(params.reference);
-  let newCount = 1;
-  if (order) {
-    order.downloadCount += 1;
-    order.updatedAt = new Date().toISOString();
-    newCount = order.downloadCount;
-  }
-
   const db = getSupabaseAdminClient();
+  const cachedOrder = ordersMap.get(params.reference);
+  let newCount = cachedOrder ? cachedOrder.downloadCount + 1 : 1;
+
   if (db) {
     try {
+      const { data: currentOrder } = await db
+        .from('orders')
+        .select('pdf_download_count')
+        .eq('order_ref', params.reference)
+        .maybeSingle();
+
+      if (currentOrder && typeof currentOrder.pdf_download_count === 'number') {
+        newCount = currentOrder.pdf_download_count + 1;
+      }
+
       await db.from('download_logs').insert({
         order_ref: params.reference,
         customer_email: params.customerEmail,
@@ -374,6 +431,11 @@ export async function recordDownloadAttempt(params: {
     } catch {
       // Non-fatal logging fallback
     }
+  }
+
+  if (cachedOrder) {
+    cachedOrder.downloadCount = newCount;
+    cachedOrder.updatedAt = new Date().toISOString();
   }
 
   securityLog('info', 'pdf_download_authorized', {
