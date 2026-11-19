@@ -158,7 +158,7 @@ export const fetchPaystackConfig = async (): Promise<PaystackGatewayConfig> => {
         backendReachable: false,
         publicKey: null,
         errorMessage:
-          'Payment backend API is unreachable. Ensure the backend server or Netlify Functions are deployed and /api/* routes correctly.',
+          'Payment backend API is unreachable. Ensure your backend server or serverless functions are deployed and /api/* routes correctly.',
       };
     }
 

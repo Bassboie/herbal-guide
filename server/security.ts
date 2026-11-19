@@ -26,7 +26,9 @@ export const MAX_DOWNLOADS_PER_ORDER = 15;
 export function isServerlessRuntime(): boolean {
   return Boolean(
     process.env.NETLIFY_FUNCTION_RUNTIME === 'true' ||
+      process.env.VERCEL_FUNCTION_RUNTIME === 'true' ||
       process.env.NETLIFY === 'true' ||
+      process.env.VERCEL === '1' ||
       process.env.AWS_LAMBDA_FUNCTION_NAME
   );
 }
@@ -521,19 +523,30 @@ export function createRateLimiter(options: {
 /**
  * Strict Origin / Callback Allowlist Helpers
  */
+function normalizeOriginCandidate(raw: string): string {
+  const trimmed = raw.trim().replace(/\/+$/, '');
+  if (!trimmed) return '';
+  if (/^https?:\/\//i.test(trimmed)) return trimmed;
+  if (/^[a-zA-Z0-9.-]+(:\d+)?$/.test(trimmed)) return `https://${trimmed}`;
+  return '';
+}
+
 export function getAllowedOrigins(): string[] {
   const origins = new Set<string>();
   const candidates = [
     process.env.APP_URL || '',
     process.env.URL || '',
     process.env.DEPLOY_PRIME_URL || '',
+    process.env.VERCEL_PROJECT_PRODUCTION_URL || '',
+    process.env.VERCEL_BRANCH_URL || '',
+    process.env.VERCEL_URL || '',
     ...(process.env.ALLOWED_ORIGINS || '').split(','),
   ];
 
   for (const raw of candidates) {
-    const trimmed = raw.trim().replace(/\/+$/, '');
-    if (trimmed && /^https?:\/\/[a-zA-Z0-9.-]+(:\d+)?$/.test(trimmed)) {
-      origins.add(trimmed);
+    const normalized = normalizeOriginCandidate(raw);
+    if (normalized && /^https?:\/\/[a-zA-Z0-9.-]+(:\d+)?$/.test(normalized)) {
+      origins.add(normalized);
     }
   }
 
@@ -549,14 +562,18 @@ export function getAllowedOrigins(): string[] {
  * Resolves a safe, non-spoofable callback base URL (prevents Origin Header Injection / Open Redirect).
  */
 export function getSafeAppBaseUrl(req: Request): string {
-  const configuredAppUrl = (process.env.APP_URL || process.env.URL || '')
-    .trim()
-    .replace(/\/+$/, '');
+  const configuredAppUrl = normalizeOriginCandidate(
+    process.env.APP_URL ||
+      process.env.URL ||
+      process.env.VERCEL_PROJECT_PRODUCTION_URL ||
+      process.env.VERCEL_URL ||
+      ''
+  );
   if (configuredAppUrl && /^https?:\/\/[a-zA-Z0-9.-]+(:\d+)?$/.test(configuredAppUrl)) {
     return configuredAppUrl;
   }
 
-  // Behind Nginx/Cloud Run/Netlify, proxy sets the real host in X-Forwarded-Host
+  // Behind Nginx/Cloud Run/Netlify/Vercel, proxy sets the real host in X-Forwarded-Host
   const forwardedHostRaw = req.get('x-forwarded-host') || '';
   const forwardedHost = forwardedHostRaw.split(',')[0].trim();
   if (forwardedHost && /^[a-zA-Z0-9.-]+(:\d+)?$/.test(forwardedHost)) {

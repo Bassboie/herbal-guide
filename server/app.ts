@@ -1095,7 +1095,7 @@ export function createApp(): express.Express {
         'Paystack key mismatch: PAYSTACK_SECRET_KEY and PAYSTACK_PUBLIC_KEY must both be Live (sk_live_/pk_live_) or both be Test (sk_test_/pk_test_).';
     } else if (persistenceMissing) {
       errorMessage =
-        'Serverless payment persistence is not configured. Add SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in Netlify environment variables.';
+        'Serverless payment persistence is not configured. Add SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in your hosting environment variables.';
     }
 
     return res.json({
